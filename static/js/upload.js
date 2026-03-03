@@ -4,10 +4,11 @@ const MAX_SIZE_MB = 500;
 function initUpload(onComplete, onError) {
     const dropZone = document.getElementById('drop-zone');
     const fileInput = document.getElementById('file-input');
-    const progressSection = document.getElementById('upload-progress');
+    const progressArea = document.getElementById('upload-progress');
     const filenameEl = document.getElementById('upload-filename');
     const barEl = document.getElementById('upload-bar');
     const statusEl = document.getElementById('upload-status');
+    const pctEl = document.getElementById('upload-pct');
 
     dropZone.addEventListener('click', () => fileInput.click());
 
@@ -23,15 +24,11 @@ function initUpload(onComplete, onError) {
     dropZone.addEventListener('drop', (e) => {
         e.preventDefault();
         dropZone.classList.remove('dragover');
-        if (e.dataTransfer.files.length > 0) {
-            handleFile(e.dataTransfer.files[0]);
-        }
+        if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
     });
 
     fileInput.addEventListener('change', () => {
-        if (fileInput.files.length > 0) {
-            handleFile(fileInput.files[0]);
-        }
+        if (fileInput.files.length > 0) handleFile(fileInput.files[0]);
     });
 
     function handleFile(file) {
@@ -40,7 +37,6 @@ function initUpload(onComplete, onError) {
             onError(`Unsupported format "${ext}". Use: ${ALLOWED_EXT.join(', ')}`);
             return;
         }
-
         const sizeMB = file.size / (1024 * 1024);
         if (sizeMB > MAX_SIZE_MB) {
             onError(`File too large (${sizeMB.toFixed(0)}MB). Max: ${MAX_SIZE_MB}MB`);
@@ -48,10 +44,11 @@ function initUpload(onComplete, onError) {
         }
 
         dropZone.hidden = true;
-        progressSection.hidden = false;
+        progressArea.hidden = false;
         filenameEl.textContent = file.name;
         barEl.style.width = '0%';
         statusEl.textContent = 'Uploading...';
+        pctEl.textContent = '0%';
 
         uploadFile(file);
     }
@@ -67,7 +64,8 @@ function initUpload(onComplete, onError) {
             if (e.lengthComputable) {
                 const pct = Math.round((e.loaded / e.total) * 100);
                 barEl.style.width = pct + '%';
-                statusEl.textContent = `Uploading... ${pct}%`;
+                statusEl.textContent = pct < 100 ? 'Uploading...' : 'Finalizing...';
+                pctEl.textContent = pct + '%';
             }
         });
 
@@ -76,12 +74,11 @@ function initUpload(onComplete, onError) {
                 const data = JSON.parse(xhr.responseText);
                 barEl.style.width = '100%';
                 statusEl.textContent = 'Upload complete';
-                onComplete(data.job_id);
+                pctEl.textContent = '100%';
+                setTimeout(() => onComplete(data.job_id), 400);
             } else {
                 let msg = 'Upload failed';
-                try {
-                    msg = JSON.parse(xhr.responseText).detail || msg;
-                } catch {}
+                try { msg = JSON.parse(xhr.responseText).detail || msg; } catch {}
                 resetUploadUI();
                 onError(msg);
             }
@@ -97,7 +94,7 @@ function initUpload(onComplete, onError) {
 
     function resetUploadUI() {
         dropZone.hidden = false;
-        progressSection.hidden = true;
+        progressArea.hidden = true;
         fileInput.value = '';
     }
 

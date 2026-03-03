@@ -12,3 +12,4 @@ build/
 venv/
 .claude/
 Subtitle-gen/
+*.spec

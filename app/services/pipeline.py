@@ -34,17 +34,19 @@ async def process_video(
     await extract_audio(video_path, audio_path)
     progress_callback("extracting_audio", 0.15)
 
-    # Step 3: Transcribe
-    progress_callback("transcribing", 0.15)
-    segments = await asyncio.to_thread(
-        transcriber.transcribe, str(audio_path)
-    )
+    # Step 3: Transcribe (audio cleanup guaranteed via try/finally)
+    try:
+        progress_callback("transcribing", 0.15)
+        segments = await asyncio.to_thread(
+            transcriber.transcribe, str(audio_path)
+        )
 
-    if not segments:
+        if not segments:
+            raise ValueError("No speech detected in the video")
+
+        progress_callback("transcribing", 0.70)
+    finally:
         audio_path.unlink(missing_ok=True)
-        raise ValueError("No speech detected in the video")
-
-    progress_callback("transcribing", 0.70)
 
     # Step 4: Generate SRT
     progress_callback("generating_subtitles", 0.72)
@@ -61,9 +63,6 @@ async def process_video(
 
     await burn_subtitles(video_path, srt_path, output_path,
                          info.duration, burn_progress)
-
-    # Cleanup intermediate audio
-    audio_path.unlink(missing_ok=True)
 
     progress_callback("complete", 1.0)
     return output_path, srt_path

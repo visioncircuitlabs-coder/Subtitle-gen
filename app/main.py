@@ -1,5 +1,7 @@
 import asyncio
+import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime
@@ -16,13 +18,15 @@ from app.config import (
     WHISPER_MODEL, WHISPER_DEVICE, WHISPER_COMPUTE_TYPE,
     CLEANUP_AGE_MINUTES, CLEANUP_INTERVAL_MINUTES, BASE_DIR,
 )
-from app.models.schemas import UploadResponse, ProgressEvent, ErrorResponse
+from app.models.schemas import UploadResponse, ProgressEvent
 from app.services.transcriber import Transcriber
 from app.services.pipeline import process_video
 from app.utils.file_manager import generate_job_id, save_upload, cleanup_old_files
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+JOB_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
 @dataclass
@@ -43,11 +47,17 @@ app = FastAPI(title="Subtitle Generator")
 jobs: dict[str, JobState] = {}
 transcriber: Transcriber | None = None
 processing_semaphore = asyncio.Semaphore(1)
+scheduler: BackgroundScheduler | None = None
+
+
+def _validate_job_id(job_id: str):
+    if not JOB_ID_RE.match(job_id):
+        raise HTTPException(400, "Invalid job ID")
 
 
 @app.on_event("startup")
 async def startup():
-    global transcriber
+    global transcriber, scheduler
     for d in [UPLOAD_DIR, OUTPUT_DIR, SUBTITLE_DIR]:
         d.mkdir(parents=True, exist_ok=True)
 
@@ -62,11 +72,30 @@ async def startup():
     scheduler.start()
 
 
+@app.on_event("shutdown")
+async def shutdown():
+    if scheduler:
+        scheduler.shutdown(wait=False)
+
+
 def _cleanup():
+    active_ids = {
+        jid for jid, j in jobs.items()
+        if j.status in ("uploaded", "processing")
+    }
     for d in [UPLOAD_DIR, OUTPUT_DIR, SUBTITLE_DIR]:
-        removed = cleanup_old_files(d, CLEANUP_AGE_MINUTES)
+        removed = cleanup_old_files(d, CLEANUP_AGE_MINUTES, active_ids)
         if removed:
             logger.info(f"Cleaned {removed} files from {d.name}")
+    # Evict stale completed/failed jobs from memory
+    cutoff = datetime.now().timestamp() - (CLEANUP_AGE_MINUTES * 60)
+    stale = [
+        jid for jid, j in jobs.items()
+        if j.status in ("completed", "failed")
+        and j.created_at.timestamp() < cutoff
+    ]
+    for jid in stale:
+        jobs.pop(jid, None)
 
 
 @app.post("/api/upload", response_model=UploadResponse)
@@ -83,13 +112,10 @@ async def upload_video(file: UploadFile):
 
     job_id = generate_job_id()
     dest = UPLOAD_DIR / f"{job_id}{ext}"
-    await save_upload(file, dest)
+    max_bytes = MAX_FILE_SIZE_MB * 1024 * 1024
+    await save_upload(file, dest, max_bytes)
 
     size_mb = dest.stat().st_size / (1024 * 1024)
-    if size_mb > MAX_FILE_SIZE_MB:
-        dest.unlink(missing_ok=True)
-        raise HTTPException(400, f"File too large ({size_mb:.0f}MB). Max: {MAX_FILE_SIZE_MB}MB")
-
     jobs[job_id] = JobState(original_filename=file.filename)
     logger.info(f"Uploaded {file.filename} as job {job_id} ({size_mb:.1f}MB)")
     return UploadResponse(job_id=job_id, filename=file.filename)
@@ -97,6 +123,7 @@ async def upload_video(file: UploadFile):
 
 @app.post("/api/process/{job_id}")
 async def start_processing(job_id: str):
+    _validate_job_id(job_id)
     if job_id not in jobs:
         raise HTTPException(404, "Job not found")
 
@@ -141,12 +168,14 @@ async def _run_pipeline(job_id: str, video_path: Path):
             job.status = "failed"
             job.error = str(e)
             job.queue.put_nowait(
-                ProgressEvent(stage="error", progress=0, message=str(e)).model_dump()
+                ProgressEvent(stage="error", progress=0,
+                              message=str(e)).model_dump()
             )
 
 
 @app.get("/api/progress/{job_id}")
 async def progress_stream(job_id: str):
+    _validate_job_id(job_id)
     if job_id not in jobs:
         raise HTTPException(404, "Job not found")
 
@@ -156,17 +185,19 @@ async def progress_stream(job_id: str):
         while True:
             try:
                 event = await asyncio.wait_for(job.queue.get(), timeout=30)
-                yield {"data": str(event).replace("'", '"')}
+                yield {"data": json.dumps(event)}
                 if event.get("stage") in ("complete", "error"):
                     break
             except asyncio.TimeoutError:
-                yield {"data": '{"stage": "heartbeat", "progress": ' + str(job.progress) + '}'}
+                yield {"data": json.dumps({"stage": "heartbeat",
+                                           "progress": job.progress})}
 
     return EventSourceResponse(event_generator())
 
 
 @app.get("/api/download/{job_id}/video")
 async def download_video(job_id: str):
+    _validate_job_id(job_id)
     if job_id not in jobs:
         raise HTTPException(404, "Job not found")
     job = jobs[job_id]
@@ -180,6 +211,7 @@ async def download_video(job_id: str):
 
 @app.get("/api/download/{job_id}/subtitle")
 async def download_subtitle(job_id: str):
+    _validate_job_id(job_id)
     if job_id not in jobs:
         raise HTTPException(404, "Job not found")
     job = jobs[job_id]
@@ -193,6 +225,7 @@ async def download_subtitle(job_id: str):
 
 @app.delete("/api/job/{job_id}")
 async def delete_job(job_id: str):
+    _validate_job_id(job_id)
     if job_id not in jobs:
         raise HTTPException(404, "Job not found")
 

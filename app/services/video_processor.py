@@ -3,21 +3,32 @@ import re
 from pathlib import Path
 from typing import Callable
 
+_nvenc_available: bool | None = None
+
 
 def _escape_ffmpeg_path(path: Path) -> str:
     s = str(path).replace("\\", "/")
     s = s.replace(":", "\\:")
+    # Escape characters that libass interprets as delimiters
+    s = s.replace("'", "\\'")
+    s = s.replace(",", "\\,")
+    s = s.replace("[", "\\[")
+    s = s.replace("]", "\\]")
     return s
 
 
 async def _check_nvenc() -> bool:
+    global _nvenc_available
+    if _nvenc_available is not None:
+        return _nvenc_available
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-hide_banner", "-encoders",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     stdout, _ = await proc.communicate()
-    return b"h264_nvenc" in stdout
+    _nvenc_available = b"h264_nvenc" in stdout
+    return _nvenc_available
 
 
 async def extract_audio(video_path: Path, output_path: Path) -> Path:
@@ -30,7 +41,7 @@ async def extract_audio(video_path: Path, output_path: Path) -> Path:
     )
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
-        raise RuntimeError(f"Audio extraction failed: {stderr.decode()[-500:]}")
+        raise RuntimeError("Audio extraction failed")
     return output_path
 
 
@@ -87,7 +98,5 @@ async def burn_subtitles(
 
     await proc.wait()
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"Subtitle burning failed: {stderr_data.decode()[-500:]}"
-        )
+        raise RuntimeError("Subtitle burning failed")
     return output_path
