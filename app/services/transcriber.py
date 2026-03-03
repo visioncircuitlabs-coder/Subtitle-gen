@@ -1,4 +1,22 @@
+import os
+import sys
 from dataclasses import dataclass
+from pathlib import Path
+
+
+def _register_cuda_dlls():
+    """Add pip-installed NVIDIA DLL directories to the DLL search path."""
+    if sys.platform != "win32":
+        return
+    site_packages = [Path(p) for p in sys.path if "site-packages" in p]
+    for sp in site_packages:
+        nvidia_dir = sp / "nvidia"
+        if not nvidia_dir.is_dir():
+            continue
+        for pkg in nvidia_dir.iterdir():
+            bin_dir = pkg / "bin"
+            if bin_dir.is_dir():
+                os.add_dll_directory(str(bin_dir))
 
 
 @dataclass
@@ -11,6 +29,7 @@ class Segment:
 class Transcriber:
     def __init__(self, model_size: str = "small", device: str = "cuda",
                  compute_type: str = "float16"):
+        _register_cuda_dlls()
         from faster_whisper import WhisperModel
         self.model = WhisperModel(model_size, device=device,
                                   compute_type=compute_type)

@@ -13,3 +13,4 @@ venv/
 .claude/
 Subtitle-gen/
 *.spec
+.playwright-mcp/

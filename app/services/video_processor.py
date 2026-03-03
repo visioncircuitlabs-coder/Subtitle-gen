@@ -1,20 +1,11 @@
 import asyncio
 import re
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Callable
 
 _nvenc_available: bool | None = None
-
-
-def _escape_ffmpeg_path(path: Path) -> str:
-    s = str(path).replace("\\", "/")
-    s = s.replace(":", "\\:")
-    # Escape characters that libass interprets as delimiters
-    s = s.replace("'", "\\'")
-    s = s.replace(",", "\\,")
-    s = s.replace("[", "\\[")
-    s = s.replace("]", "\\]")
-    return s
 
 
 async def _check_nvenc() -> bool:
@@ -52,51 +43,61 @@ async def burn_subtitles(
     duration: float,
     progress_callback: Callable[[float], None] | None = None,
 ) -> Path:
-    escaped_srt = _escape_ffmpeg_path(srt_path)
-    subtitle_filter = (
-        f"subtitles={escaped_srt}:force_style='"
-        "FontSize=24,FontName=Arial,"
-        "PrimaryColour=&H00FFFFFF,"
-        "OutlineColour=&H00000000,"
-        "Outline=2,Shadow=1,MarginV=30'"
-    )
+    # Copy SRT next to the video to avoid Windows path escaping issues
+    # with FFmpeg's libass subtitle filter
+    local_srt = video_path.parent / f"_subs_{video_path.stem}.srt"
+    shutil.copy2(srt_path, local_srt)
 
-    nvenc = await _check_nvenc()
-    if nvenc:
-        codec_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23"]
-    else:
-        codec_args = ["-c:v", "libx264", "-preset", "medium", "-crf", "23"]
+    try:
+        # Use just the filename since we set cwd to the video's directory
+        srt_name = local_srt.name
+        subtitle_filter = (
+            f"subtitles={srt_name}:force_style='"
+            "FontSize=24,FontName=Arial,"
+            "PrimaryColour=&H00FFFFFF,"
+            "OutlineColour=&H00000000,"
+            "Outline=2,Shadow=1,MarginV=30'"
+        )
 
-    cmd = [
-        "ffmpeg", "-y", "-i", str(video_path),
-        "-vf", subtitle_filter,
-        *codec_args,
-        "-c:a", "copy",
-        str(output_path),
-    ]
+        nvenc = await _check_nvenc()
+        if nvenc:
+            codec_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23"]
+        else:
+            codec_args = ["-c:v", "libx264", "-preset", "medium", "-crf", "23"]
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+        cmd = [
+            "ffmpeg", "-y", "-i", str(video_path),
+            "-vf", subtitle_filter,
+            *codec_args,
+            "-c:a", "copy",
+            str(output_path),
+        ]
 
-    time_pattern = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})")
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(video_path.parent),
+        )
 
-    stderr_data = b""
-    while True:
-        chunk = await proc.stderr.read(1024)
-        if not chunk:
-            break
-        stderr_data += chunk
-        text = chunk.decode(errors="replace")
-        match = time_pattern.search(text)
-        if match and duration > 0 and progress_callback:
-            h, m, s, cs = (int(x) for x in match.groups())
-            current = h * 3600 + m * 60 + s + cs / 100
-            progress_callback(min(current / duration, 1.0))
+        time_pattern = re.compile(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})")
 
-    await proc.wait()
-    if proc.returncode != 0:
-        raise RuntimeError("Subtitle burning failed")
-    return output_path
+        stderr_data = b""
+        while True:
+            chunk = await proc.stderr.read(1024)
+            if not chunk:
+                break
+            stderr_data += chunk
+            text = chunk.decode(errors="replace")
+            match = time_pattern.search(text)
+            if match and duration > 0 and progress_callback:
+                h, m, s, cs = (int(x) for x in match.groups())
+                current = h * 3600 + m * 60 + s + cs / 100
+                progress_callback(min(current / duration, 1.0))
+
+        await proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError("Subtitle burning failed")
+        return output_path
+    finally:
+        local_srt.unlink(missing_ok=True)
