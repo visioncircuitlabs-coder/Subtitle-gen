@@ -20,10 +20,18 @@ def _register_cuda_dlls():
 
 
 @dataclass
+class Word:
+    start: float
+    end: float
+    word: str
+
+
+@dataclass
 class Segment:
     start: float
     end: float
     text: str
+    words: list[Word] | None = None
 
 
 class Transcriber:
@@ -36,7 +44,7 @@ class Transcriber:
 
     def transcribe(self, audio_path: str,
                    language: str | None = None) -> list[Segment]:
-        kwargs = {"beam_size": 5, "vad_filter": True}
+        kwargs = {"beam_size": 5, "vad_filter": True, "word_timestamps": True}
         if language:
             kwargs["language"] = language
 
@@ -46,6 +54,12 @@ class Transcriber:
         for seg in segments_iter:
             text = seg.text.strip()
             if text:
+                words = None
+                if seg.words:
+                    words = [
+                        Word(start=w.start, end=w.end, word=w.word.strip())
+                        for w in seg.words if w.word.strip()
+                    ]
                 segments.append(Segment(start=seg.start, end=seg.end,
-                                        text=text))
+                                        text=text, words=words))
         return segments

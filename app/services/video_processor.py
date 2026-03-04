@@ -53,10 +53,10 @@ async def burn_subtitles(
         srt_name = local_srt.name
         subtitle_filter = (
             f"subtitles={srt_name}:force_style='"
-            "FontSize=24,FontName=Arial,"
+            "FontSize=28,FontName=Arial,Bold=1,"
             "PrimaryColour=&H00FFFFFF,"
-            "OutlineColour=&H00000000,"
-            "Outline=2,Shadow=1,MarginV=30'"
+            "BackColour=&H80000000,"
+            "BorderStyle=4,Outline=0,Shadow=0,MarginV=25'"
         )
 
         nvenc = await _check_nvenc()
